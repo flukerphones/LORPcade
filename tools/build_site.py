@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """LORPcade site generator. Standard library only.
 
-    python3 tools/build_site.py list                  JSON array of detected game folders (used by CI)
-    python3 tools/build_site.py publish-dir <slug>    folder that gets published for one game (used by CI)
-    python3 tools/build_site.py build [--built DIR] [--out _site]
-                                                      assemble the homepage + every game into one site
+    python3 tools/build_site.py [--out _site]
 
-A game is any folder under games/ that has a game.json, a build_web.sh, or a web/index.html.
-The folder name is the URL: games/endless_sortie/ is served at <site>/endless_sortie/.
+Games are prebuilt: any folder that has an index.html is a game, and it is published as is
+at /<folder-name>/. Looked for in two places, so use whichever you prefer:
+    <repo>/<game>/index.html          (a folder at the top level of the repo)
+    <repo>/games/<game>/index.html    (a folder inside games/)
 
-What gets published for a game:
-  * has build_web.sh -> its dist-web/ folder (the script must create it)
-  * otherwise        -> its web/ folder, as is
-
-With --built DIR (CI), each game's finished files are read from DIR/game-<slug>/ instead.
+An optional game.json next to the index.html sets the title, blurb, colour etc. (see README).
+Nothing is compiled here; this only writes the home screen and copies the game folders.
 """
 import argparse
 import colorsys
@@ -28,12 +24,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GAMES = ROOT / "games"
 SITE_SRC = Path(__file__).resolve().parent / "site"
-ASSETS = "arcade-assets"  # reserved folder name for the homepage's own files
+ASSETS = "arcade-assets"  # the home screen's own files; can't be used as a game name
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 THUMBS = ("thumb.png", "thumb.jpg", "thumb.jpeg", "thumb.webp", "thumb.gif")
 HEX_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+NOT_GAMES = {"tools", "games", ASSETS, "node_modules"}  # top-level folders never treated as games
 
 
 def die(msg):
@@ -47,28 +43,26 @@ def warn(msg):
 
 # ---------------------------------------------------------------- detection
 
-def looks_like_game(p: Path) -> bool:
-    return (p / "game.json").is_file() or (p / "build_web.sh").is_file() or (p / "web" / "index.html").is_file()
-
-
 def discover():
-    if not GAMES.is_dir():
-        return []
-    found = []
-    for p in sorted(GAMES.iterdir()):
-        if not p.is_dir() or p.name.startswith((".", "_")) or not looks_like_game(p):
+    """-> {slug: folder}. A game is a folder containing index.html."""
+    found = {}
+    for base in (ROOT, ROOT / "games"):
+        if not base.is_dir():
             continue
-        if not SLUG_RE.match(p.name) or p.name == ASSETS:
-            warn(f"skipping games/{p.name}: folder names may only use letters, digits, '_' and '-' "
-                 f"(and can't be '{ASSETS}')")
-            continue
-        found.append(p.name)
+        for p in sorted(base.iterdir()):
+            if not p.is_dir() or p.name.startswith((".", "_")) or not (p / "index.html").is_file():
+                continue
+            if base == ROOT and p.name in NOT_GAMES:
+                continue
+            if not SLUG_RE.match(p.name) or p.name == ASSETS:
+                warn(f"skipping {p.relative_to(ROOT)}: folder names may only use letters, digits, '_' and '-' "
+                     f"(and can't be '{ASSETS}')")
+                continue
+            if p.name in found:
+                die(f"two game folders are both called '{p.name}': {found[p.name].relative_to(ROOT)} and "
+                    f"{p.relative_to(ROOT)}")
+            found[p.name] = p
     return found
-
-
-def publish_dir(slug):
-    g = GAMES / slug
-    return g / "dist-web" if (g / "build_web.sh").is_file() else g / "web"
 
 
 # ---------------------------------------------------------------- manifest
@@ -86,30 +80,29 @@ def norm_hex(value):
     return "#" + "".join(c * 2 for c in v[1:]) if len(v) == 4 else v
 
 
-def load_game(slug):
-    g = GAMES / slug
+def load_game(slug, folder):
     raw = {}
-    mf = g / "game.json"
+    mf = folder / "game.json"
     if mf.is_file():
         try:
             raw = json.loads(mf.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            die(f"games/{slug}/game.json is not valid JSON: {e}")
+            die(f"{mf.relative_to(ROOT)} is not valid JSON: {e}")
         if not isinstance(raw, dict):
-            die(f"games/{slug}/game.json must be a JSON object")
+            die(f"{mf.relative_to(ROOT)} must be a JSON object")
 
     def text(key):
         v = raw.get(key)
         return v.strip() if isinstance(v, str) else ""
 
     if raw.get("accent") and not norm_hex(raw["accent"]):
-        warn(f"games/{slug}/game.json: 'accent' should look like #ff2e97; using an automatic colour")
+        warn(f"{slug}/game.json: 'accent' should look like #ff2e97; using an automatic colour")
 
-    thumb = None
-    for name in ([raw["thumbnail"]] if isinstance(raw.get("thumbnail"), str) else []) + list(THUMBS):
-        cand = (g / name)
-        if cand.is_file():
-            thumb = cand
+    thumb = None  # path relative to the game folder (it is published along with the game)
+    wanted = ([raw["thumbnail"]] if isinstance(raw.get("thumbnail"), str) else []) + list(THUMBS)
+    for name in wanted:
+        if (folder / name).is_file():
+            thumb = name.replace("\\", "/").lstrip("/")
             break
 
     requires = raw.get("requires", [])
@@ -135,8 +128,7 @@ def load_game(slug):
 def render_card(game):
     e = html.escape
     if game["thumb"]:
-        art = (f'<img class="art-img" src="{ASSETS}/thumbs/{game["slug"]}{game["thumb"].suffix.lower()}" '
-               f'alt="" loading="lazy">')
+        art = f'<img class="art-img" src="{game["slug"]}/{e(game["thumb"])}" alt="" loading="lazy">'
     else:
         art = '<div class="art-gen" aria-hidden="true"><i class="sun"></i><i class="floor"></i></div>'
     tags = "".join(f"<li>{e(t)}</li>" for t in (game["genre"], game["players"], game["controls"]) if t)
@@ -160,34 +152,23 @@ def render_card(game):
 
 
 EMPTY = ('<li class="empty"><p>No games on the floor yet.</p>'
-         '<p>Add a folder to <code>games/</code> and push to the main branch.</p></li>')
+         '<p>Add a game folder with an <code>index.html</code> and push to the main branch.</p></li>')
 
 
-def build(out: Path, built: Path | None):
-    games = [load_game(s) for s in discover()]
+def build(out: Path):
+    found = discover()
+    games = [load_game(slug, folder) for slug, folder in found.items()]
     listed = sorted((g for g in games if not g["hidden"]), key=lambda g: (g["order"], g["title"].lower()))
 
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
-    for g in games:
-        slug = g["slug"]
-        src = (built / f"game-{slug}") if built else publish_dir(slug)
-        if not (src / "index.html").is_file():
-            hint = ("the CI build job for it must have failed or been skipped" if built
-                    else f"run games/{slug}/build_web.sh first" if (GAMES / slug / "build_web.sh").is_file()
-                    else f"it needs a web/index.html")
-            die(f"no index.html for '{slug}' in {src} ({hint})")
-        shutil.copytree(src, out / slug)
-        print(f"  game  {slug:<24} <- {src.relative_to(ROOT) if src.is_relative_to(ROOT) else src}")
+    for slug, folder in found.items():
+        shutil.copytree(folder, out / slug, ignore=shutil.ignore_patterns(".git", ".git*", ".DS_Store"))
+        print(f"  game  {slug:<24} <- {folder.relative_to(ROOT)}/")
 
-    assets = out / ASSETS
-    shutil.copytree(SITE_SRC / "fonts", assets / "fonts")
-    for g in listed:
-        if g["thumb"]:
-            (assets / "thumbs").mkdir(exist_ok=True)
-            shutil.copy2(g["thumb"], assets / "thumbs" / f'{g["slug"]}{g["thumb"].suffix.lower()}')
+    shutil.copytree(SITE_SRC / "fonts", out / ASSETS / "fonts")
 
     repo = os.environ.get("GITHUB_REPOSITORY")
     sha = os.environ.get("GITHUB_SHA", "")[:7] or "local"
@@ -206,23 +187,8 @@ def build(out: Path, built: Path | None):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
-    pd = sub.add_parser("publish-dir")
-    pd.add_argument("slug")
-    b = sub.add_parser("build")
-    b.add_argument("--built", type=Path, help="folder holding game-<slug>/ build outputs (CI)")
-    b.add_argument("--out", type=Path, default=ROOT / "_site")
-    args = ap.parse_args()
-
-    if args.cmd == "list":
-        print(json.dumps(discover()))
-    elif args.cmd == "publish-dir":
-        if args.slug not in discover():
-            die(f"'{args.slug}' is not a game folder")
-        print(publish_dir(args.slug).relative_to(ROOT).as_posix())
-    else:
-        build(args.out, args.built)
+    ap.add_argument("--out", type=Path, default=ROOT / "_site")
+    build(ap.parse_args().out)
 
 
 if __name__ == "__main__":
