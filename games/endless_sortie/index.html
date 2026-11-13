@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ENDLESS SORTIE</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  /* The canvas is sized by CSS; the game follows it (winit reports every resize). */
+  canvas#game { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
+  #overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: rgba(0, 0, 0, 0.82); color: #cfe3f5; font: 600 18px/1.4 system-ui, sans-serif;
+    letter-spacing: 0.08em; text-align: center; padding: 24px; cursor: default; user-select: none;
+  }
+  #overlay h1 { margin: 0; font-size: 34px; letter-spacing: 0.22em; color: #fff; }
+  #overlay small { font-weight: 400; font-size: 14px; letter-spacing: 0.03em; opacity: 0.75; max-width: 46em; }
+  #overlay.ready { cursor: pointer; }
+  #overlay.gone { display: none; }
+  #overlay.error { color: #ffb4a8; }
+</style>
+</head>
+<body>
+<canvas id="game" tabindex="0"></canvas>
+<div id="overlay">
+  <h1>ENDLESS SORTIE</h1>
+  <div id="msg">Loading...</div>
+  <small id="hint"></small>
+</div>
+<script type="module">
+  import init from "./endless_sortie.js";
+
+  const canvas = document.getElementById("game");
+  const overlay = document.getElementById("overlay");
+  const msg = document.getElementById("msg");
+  const hint = document.getElementById("hint");
+
+  function fail(text) {
+    overlay.className = "error";
+    msg.textContent = text;
+    hint.textContent = "Open the browser console (F12) for details.";
+  }
+
+  if (!navigator.gpu) {
+    fail("This browser has no WebGPU support.");
+    hint.textContent = "Use a recent Chrome, Edge, Firefox or Safari with WebGPU enabled, on a device with a supported GPU.";
+  } else {
+    // Any panic in the game ends up here (the wasm module traps).
+    window.addEventListener("error", () => fail("Something went wrong."));
+    window.addEventListener("unhandledrejection", () => fail("Something went wrong."));
+
+    init().then(() => {
+      msg.textContent = "CLICK TO START";
+      hint.textContent = "Mouse + keyboard. Progress is saved in this browser.";
+      overlay.classList.add("ready");
+      // Keyboard events go to the focused canvas, and audio / pointer lock need a user gesture anyway.
+      overlay.addEventListener("click", () => {
+        overlay.classList.add("gone");
+        canvas.focus();
+      }, { once: true });
+    }).catch((e) => { console.error(e); fail("Failed to load the game."); });
+  }
+</script>
+</body>
+</html>
