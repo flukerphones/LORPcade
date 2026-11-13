@@ -1,0 +1,117 @@
+name: Build and deploy LORPcade
+
+# Every push to main rebuilds the homepage and redeploys all games.
+# Pull requests build everything (so breakage shows up early) but never deploy.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # 1. Find the games: every folder under games/ with a game.json, build_web.sh or web/index.html.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      games: ${{ steps.list.outputs.games }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: echo "games=$(python3 tools/build_site.py list)" >> "$GITHUB_OUTPUT"
+
+  # 2. Build each game in parallel. A game whose files haven't changed restores its
+  #    finished build from cache instead of recompiling.
+  build:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        game: ${{ fromJSON(needs.discover.outputs.games) }}
+    env:
+      GAME: ${{ matrix.game }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Work out what this game needs
+        id: game
+        run: |
+          echo "dir=$(python3 tools/build_site.py publish-dir "$GAME")" >> "$GITHUB_OUTPUT"
+          [ -f "games/$GAME/build_web.sh" ] && echo "scripted=true" >> "$GITHUB_OUTPUT" || echo "scripted=false" >> "$GITHUB_OUTPUT"
+          [ -f "games/$GAME/Cargo.toml" ]   && echo "rust=true"     >> "$GITHUB_OUTPUT" || echo "rust=false"     >> "$GITHUB_OUTPUT"
+
+      - name: Restore finished build
+        id: finished
+        if: steps.game.outputs.scripted == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.game.outputs.dir }}
+          key: build-${{ matrix.game }}-${{ hashFiles(format('games/{0}/**', matrix.game), '.github/workflows/pages.yml') }}
+
+      - name: Install Rust (wasm32 target)
+        if: steps.game.outputs.rust == 'true' && steps.finished.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Caches compiled dependencies and the wasm-bindgen CLI that build_web.sh installs.
+      - name: Cache Rust dependencies
+        if: steps.game.outputs.rust == 'true' && steps.finished.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: games/${{ matrix.game }}
+
+      - name: Build
+        if: steps.game.outputs.scripted == 'true' && steps.finished.outputs.cache-hit != 'true'
+        working-directory: games/${{ matrix.game }}
+        run: sh build_web.sh
+
+      - name: Check there is something to publish
+        env:
+          DIR: ${{ steps.game.outputs.dir }}
+        run: test -f "$DIR/index.html" || { echo "::error::$DIR/index.html is missing"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: game-${{ matrix.game }}
+          path: ${{ steps.game.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # 3. Generate the LORPcade home screen from the games' game.json files and bundle everything.
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: game-*
+          path: built
+      - name: Generate the site
+        run: python3 tools/build_site.py build --built built --out _site
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  # 4. Publish (not on pull requests).
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: assemble
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
