@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LORPcade</title>
+<meta name="description" content="LORPcade is a free browser arcade. Pick a game and press start.">
+<meta name="theme-color" content="#0d0221">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Crect width='8' height='8' fill='%230d0221'/%3E%3Cpath d='M2 1h2v5h3v1H2z' fill='%23ff2e97'/%3E%3C/svg%3E">
+<link rel="preload" href="arcade-assets/fonts/press-start-2p.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+@font-face { font-family: "Press Start 2P"; src: url("arcade-assets/fonts/press-start-2p.woff2") format("woff2"); font-display: swap; }
+@font-face { font-family: "VT323"; src: url("arcade-assets/fonts/vt323.woff2") format("woff2"); font-display: swap; }
+
+:root {
+  --void: #0d0221;      /* inside the cabinet */
+  --panel: #241058;     /* control deck */
+  --magenta: #ff2e97;
+  --cyan: #2de2ff;
+  --yellow: #ffe14d;
+  --orange: #ff7a1a;
+  --ink: #f3e9ff;
+  --dim: #b4a6dc;
+  --display: "Press Start 2P", ui-monospace, "Courier New", monospace;
+  --body: "VT323", ui-monospace, "Courier New", monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--void); color-scheme: dark; }
+body {
+  margin: 0; min-height: 100svh; overflow-x: hidden;
+  font: 22px/1.2 var(--body); color: var(--ink);
+  background: radial-gradient(120% 70% at 50% 0%, #34107e 0%, rgba(52, 16, 126, 0) 60%), var(--void);
+}
+/* stars */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -1; opacity: .6;
+  background-image:
+    radial-gradient(1px 1px at 20px 30px, #fff, transparent),
+    radial-gradient(1px 1px at 120px 80px, #9ff, transparent),
+    radial-gradient(2px 2px at 220px 150px, #fff, transparent),
+    radial-gradient(1px 1px at 70px 190px, #fdf, transparent),
+    radial-gradient(1px 1px at 270px 40px, #fff, transparent);
+  background-size: 300px 220px;
+}
+/* CRT: scanlines + vignette over everything */
+.crt {
+  position: fixed; inset: 0; z-index: 50; pointer-events: none;
+  background:
+    repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.2) 2px 3px),
+    radial-gradient(ellipse at center, transparent 58%, rgba(0,0,0,.5) 100%);
+}
+a { color: var(--cyan); }
+code { font: inherit; color: var(--yellow); }
+:focus-visible { outline: 3px dashed var(--yellow); outline-offset: 4px; }
+
+/* ---------- HUD ---------- */
+.hud {
+  position: relative; z-index: 2;
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: calc(14px + env(safe-area-inset-top)) clamp(14px, 3vw, 32px) 14px;
+  font: 10px/1 var(--display); text-transform: uppercase;
+}
+.hud .lbl { color: var(--cyan); }
+.hud .val { margin-left: .8em; color: var(--ink); }
+.hud .free { color: var(--yellow); animation: blink 1.1s steps(1) infinite; }
+.hud button {
+  font: inherit; text-transform: inherit; color: var(--cyan); background: none; border: 0;
+  padding: 8px 0; cursor: pointer;
+}
+.hud button b { margin-left: .8em; font-weight: 400; color: var(--ink); }
+.hud button[aria-pressed="true"] b { color: var(--yellow); }
+
+/* ---------- hero: the sign ---------- */
+.hero {
+  position: relative; isolation: isolate; overflow: hidden;
+  display: grid; place-items: center;
+  height: clamp(230px, 33vh, 330px);
+}
+.scenery { position: absolute; inset: 0; z-index: -1; }
+.scenery .sun {
+  position: absolute; left: 50%; top: 70%; width: min(64vw, 380px); aspect-ratio: 1; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: linear-gradient(180deg, var(--yellow) 8%, var(--orange) 50%, var(--magenta) 92%);
+  -webkit-mask-image: linear-gradient(#000 0 52%, transparent 52% 56%, #000 56% 63%, transparent 63% 69%, #000 69% 77%, transparent 77% 85%, #000 85% 100%);
+          mask-image: linear-gradient(#000 0 52%, transparent 52% 56%, #000 56% 63%, transparent 63% 69%, #000 69% 77%, transparent 77% 85%, #000 85% 100%);
+  clip-path: inset(0 0 50% 0);                 /* only the half above the horizon */
+  filter: drop-shadow(0 0 40px rgba(255, 46, 151, .55));
+}
+.scenery .floor {
+  position: absolute; left: 0; right: 0; top: 70%; bottom: 0; overflow: hidden;
+  background: linear-gradient(180deg, #1a0450, var(--void));
+  -webkit-mask-image: linear-gradient(#000 45%, transparent); mask-image: linear-gradient(#000 45%, transparent);
+  border-top: 2px solid var(--magenta);
+  box-shadow: 0 -6px 30px rgba(255, 46, 151, .6);
+}
+.scenery .floor::before {
+  content: ""; position: absolute; left: -80%; right: -80%; top: 0; bottom: -60%;
+  background:
+    linear-gradient(var(--magenta) 2px, transparent 2px) 0 0 / 100% 36px,
+    linear-gradient(90deg, var(--magenta) 2px, transparent 2px) 0 0 / 56px 100%;
+  transform: perspective(240px) rotateX(62deg); transform-origin: 50% 0;
+  animation: roll 1.6s linear infinite;
+  opacity: .85;
+}
+@keyframes roll { to { background-position: 0 36px, 0 0; } }
+
+/* the wordmark: stacked extrusion behind a banded chrome face */
+.logo {
+  position: relative; margin: 0 0 5vh; font: clamp(30px, 10vw, 88px)/1 var(--display);
+  letter-spacing: -.02em; white-space: nowrap;
+}
+.logo > span { display: block; }
+.logo .shadow {
+  position: absolute; inset: 0; color: #ff2e97;
+  text-shadow:
+    1px 1px 0 #e0238a, 2px 2px 0 #c21c7d, 3px 3px 0 #a31670, 4px 4px 0 #851163,
+    5px 5px 0 #670d56, 6px 6px 0 #4a0a49, 7px 7px 0 #34083c, 8px 8px 0 #20052d,
+    0 0 .35em rgba(255, 46, 151, .8), 0 0 .9em rgba(255, 46, 151, .5);
+}
+.logo .face {
+  position: relative;
+  background: linear-gradient(180deg, #fff 0 28%, #c9f7ff 28% 48%, var(--cyan) 48% 70%, #159fd6 70%);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent;
+}
+.logo { animation: power-on 1.5s steps(1) 1 both; }
+@keyframes power-on {
+  0%   { opacity: 0; }  6%  { opacity: 1; }  9%  { opacity: .15; } 16% { opacity: 1; }
+  21%  { opacity: .3; } 27% { opacity: 1; }  31% { opacity: .55; } 36% { opacity: 1; } 100% { opacity: 1; }
+}
+
+/* ---------- select screen ---------- */
+main { max-width: 1240px; margin: 0 auto; padding: clamp(20px, 4vh, 40px) clamp(16px, 4vw, 40px) 72px; }
+.select { margin: 0; text-align: center; font: 14px/1.6 var(--display); color: var(--yellow); text-transform: uppercase; }
+.select::after { content: "_"; margin-left: .15em; animation: blink 1s steps(1) infinite; }
+.hint { margin: 8px 0 28px; text-align: center; color: var(--dim); font-size: 24px; }
+.hint .touch { display: none; }
+@media (hover: none), (pointer: coarse) { .hint .keys { display: none; } .hint .touch { display: inline; } }
+
+.floor-plan {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 36px 32px; justify-content: center;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 360px));
+}
+.slot { display: flex; }
+.empty { grid-column: 1 / -1; text-align: center; color: var(--dim); }
+
+/* ---------- cabinet ---------- */
+.cab {
+  --c: 8px; display: block; flex: 1; min-width: 0; position: relative; color: inherit; text-decoration: none;
+  container-type: inline-size;
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--accent) 45%, transparent));
+  transition: transform .12s steps(2), filter .12s steps(2);
+}
+.cab:hover, .cab:focus-visible {
+  transform: translateY(-6px);
+  filter: drop-shadow(0 0 26px color-mix(in srgb, var(--accent) 85%, transparent));
+}
+.cab:focus-visible { outline-offset: 10px; }
+.cab:active { transform: translateY(-2px); }
+.frame, .cab-in {
+  clip-path: polygon(0 var(--c), var(--c) var(--c), var(--c) 0, calc(100% - var(--c)) 0, calc(100% - var(--c)) var(--c), 100% var(--c),
+                     100% calc(100% - var(--c)), calc(100% - var(--c)) calc(100% - var(--c)), calc(100% - var(--c)) 100%,
+                     var(--c) 100%, var(--c) calc(100% - var(--c)), 0 calc(100% - var(--c)));
+}
+.frame { height: 100%; padding: 6px; background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 40%, var(--magenta))); }
+.cab-in { --c: 6px; height: 100%; display: flex; flex-direction: column; background: var(--void); }
+
+.marquee {
+  padding: 12px 14px; text-align: center; display: grid; place-items: center;
+  font: clamp(12px, 5.6cqi, 22px)/1.4 var(--display); min-height: calc(2.8em + 24px);
+  background: linear-gradient(180deg, #000, color-mix(in srgb, var(--accent) 22%, #000));
+  border-bottom: 4px solid var(--accent);
+}
+.marquee-title {
+  font: inherit; text-transform: uppercase; text-wrap: balance; color: #fff;
+  text-shadow: 0 0 4px #fff, 0 0 12px var(--accent), 0 0 28px var(--accent);
+}
+
+.bezel { padding: 14px 14px 10px; background: #05010f; }
+.screen {
+  position: relative; aspect-ratio: 16 / 10; overflow: hidden; border-radius: 14px / 12px; background: #05010f;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .07), 0 0 0 3px #1a0b3d;
+}
+.screen .glass { position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background:
+    repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.28) 2px 3px),
+    linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,0) 32%),
+    radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.65) 100%); }
+.art-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* generated screen for games without a thumb.png: sun over a grid, tinted by the game's colour */
+.art-gen { position: absolute; inset: 0;
+  background: linear-gradient(180deg, #12053a 0%, color-mix(in srgb, var(--accent) 42%, #1b0850) 60%); }
+.art-gen i { position: absolute; display: block; }
+.art-gen .sun {
+  left: 50%; top: 60%; width: 46%; aspect-ratio: 1; border-radius: 50%; transform: translate(-50%, -50%);
+  background: linear-gradient(180deg, var(--yellow), var(--orange) 55%, var(--magenta));
+  -webkit-mask-image: linear-gradient(#000 0 50%, transparent 50% 56%, #000 56% 66%, transparent 66% 74%, #000 74% 100%);
+          mask-image: linear-gradient(#000 0 50%, transparent 50% 56%, #000 56% 66%, transparent 66% 74%, #000 74% 100%);
+}
+.art-gen .floor { left: 0; right: 0; top: 60%; bottom: 0; overflow: hidden; background: #0b0330; border-top: 2px solid var(--accent); }
+.art-gen .floor::before {
+  content: ""; position: absolute; left: -70%; right: -70%; top: 0; bottom: -50%;
+  background:
+    linear-gradient(var(--accent) 1.5px, transparent 1.5px) 0 0 / 100% 20px,
+    linear-gradient(90deg, var(--accent) 1.5px, transparent 1.5px) 0 0 / 34px 100%;
+  transform: perspective(130px) rotateX(58deg); transform-origin: 50% 0;
+}
+.cab:hover .art-gen .floor::before, .cab:focus-visible .art-gen .floor::before { animation: roll-card .9s linear infinite; }
+@keyframes roll-card { to { background-position: 0 20px, 0 0; } }
+
+.deck { flex: 1; display: flex; flex-direction: column; padding: 14px 16px 16px; background: linear-gradient(180deg, var(--panel), #170a3c); border-top: 4px solid var(--accent); }
+.tagline { margin: 0 0 4px; font-size: 26px; line-height: 1; color: var(--accent); text-transform: uppercase; text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent); }
+.desc { margin: 0 0 12px; color: var(--ink); font-size: 23px; line-height: 1.1; }
+.tags { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.tags li { font: 9px/1 var(--display); text-transform: uppercase; color: var(--dim); padding: 6px 7px; border: 2px solid color-mix(in srgb, var(--dim) 50%, transparent); }
+.warn { display: none; margin: 0 0 12px; color: #ff6f86; font-size: 22px; line-height: 1.1; }
+.cab.nogpu .warn { display: block; }
+
+.start { display: flex; align-items: center; gap: 14px; margin-top: auto; padding-top: 12px; border-top: 2px dashed rgba(180, 166, 220, .35); }
+.btn {
+  flex: none; width: 34px; height: 34px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 28%, #ffb3bf 0 10%, #ff2e4d 40%, #a3001b 100%);
+  box-shadow: 0 4px 0 #5a0010, 0 0 0 3px #1a0b3d, 0 0 0 5px #3b2a78;
+  transition: transform .06s steps(1), box-shadow .06s steps(1);
+}
+.cab:active .btn { transform: translateY(3px); box-shadow: 0 1px 0 #5a0010, 0 0 0 3px #1a0b3d, 0 0 0 5px #3b2a78; }
+.start-label { font: 12px/1 var(--display); text-transform: uppercase; color: var(--ink); }
+/* a pixel cursor appears when the cabinet is selected */
+.start-label::before {
+  content: ""; display: inline-block; width: 10px; height: 14px; margin-right: 10px; vertical-align: -2px;
+  background: var(--yellow); clip-path: polygon(0 0, 100% 50%, 0 100%); visibility: hidden;
+}
+.cab:hover .start-label::before, .cab:focus-visible .start-label::before { visibility: visible; }
+.cab:hover .start-label, .cab:focus-visible .start-label { color: var(--yellow); animation: blink .9s steps(1) infinite; }
+
+/* ---------- footer ---------- */
+footer { padding: 0 16px calc(36px + env(safe-area-inset-bottom)); text-align: center; color: var(--dim); font-size: 21px; }
+
+@keyframes blink { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="crt" aria-hidden="true"></div>
+
+<header class="hud">
+  <div><span class="lbl">Games</span><span class="val">{{GAME_COUNT}}</span></div>
+  <div class="free">Free play</div>
+  <button id="snd" type="button" aria-pressed="false"><span class="lbl">Sound</span><b>Off</b></button>
+</header>
+
+<div class="hero">
+  <div class="scenery" aria-hidden="true"><div class="sun"></div><div class="floor"></div></div>
+  <h1 class="logo"><span class="shadow" aria-hidden="true">LORPcade</span><span class="face">LORPcade</span></h1>
+</div>
+
+<main>
+  <h2 class="select">Select a game</h2>
+  <p class="hint"><span class="keys">Arrow keys to choose, Enter to start.</span><span class="touch">Tap a cabinet to start.</span></p>
+  <ul class="floor-plan">{{CARDS}}
+  </ul>
+</main>
+
+<footer>
+  <p>Built from commit {{BUILD_SHA}} on {{BUILD_DATE}}.{{SOURCE}}</p>
+</footer>
+
+<script>
+(() => {
+  const cards = [...document.querySelectorAll(".cab")];
+
+  // Flag games that need WebGPU when the browser doesn't report it.
+  if (!("gpu" in navigator)) {
+    cards.forEach(c => { if ((c.dataset.requires || "").split(" ").includes("webgpu")) c.classList.add("nogpu"); });
+  }
+
+  // Optional chiptune bleeps, off by default and remembered per browser.
+  const btn = document.getElementById("snd");
+  let on = false, ctx;
+  try { on = localStorage.getItem("lorpcade-sound") === "1"; } catch (e) {}
+  const paint = () => { btn.setAttribute("aria-pressed", on); btn.querySelector("b").textContent = on ? "On" : "Off"; };
+  const tone = (freq, at = 0, len = 0.07) => {
+    if (!on) return;
+    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+    const t = ctx.currentTime + at, o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "square"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + len);
+  };
+  btn.addEventListener("click", () => {
+    on = !on; paint();
+    try { localStorage.setItem("lorpcade-sound", on ? "1" : "0"); } catch (e) {}
+    tone(880);
+  });
+  paint();
+
+  cards.forEach(c => {
+    c.addEventListener("focus", () => tone(660));
+    c.addEventListener("click", e => {
+      if (!on || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();                                  // let the start jingle play, then go
+      [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.07));
+      setTimeout(() => { location.href = c.href; }, 340);
+    });
+  });
+
+  // Arrow keys step through the cabinets.
+  document.addEventListener("keydown", e => {
+    const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+    if (!step || e.altKey || e.ctrlKey || e.metaKey || !cards.length) return;
+    const i = cards.indexOf(document.activeElement);
+    if (i < 0 && (e.key === "ArrowUp" || e.key === "ArrowDown")) return;   // let the page scroll
+    e.preventDefault();
+    cards[i < 0 ? 0 : (i + step + cards.length) % cards.length].focus();
+  });
+
+  // With a mouse and keyboard, start with the first cabinet selected.
+  if (cards[0] && matchMedia("(hover: hover) and (pointer: fine)").matches) cards[0].focus({ preventScroll: true });
+})();
+</script>
+</body>
+</html>
