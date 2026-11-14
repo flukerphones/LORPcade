@@ -2,22 +2,42 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- No viewport-fit=cover on purpose: on notched phones the browser then keeps the game (and its
+     touch controls) inside the safe area instead of under the notch / home bar. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Endless Sortie">
+<meta name="theme-color" content="#000000">
 <title>ENDLESS SORTIE</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  /* The canvas is sized by CSS; the game follows it (winit reports every resize). */
-  canvas#game { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
-  #overlay {
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  /* The canvas is sized by CSS; the game follows it (winit reports every resize).
+     dvh = the visible height on phones, where 100vh includes the area under the browser bars. */
+  canvas#game { position: fixed; inset: 0; display: block; width: 100%; height: 100vh; height: 100dvh; outline: none; touch-action: none; }
+  #overlay, #rotate {
     position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 14px; background: rgba(0, 0, 0, 0.82); color: #cfe3f5; font: 600 18px/1.4 system-ui, sans-serif;
-    letter-spacing: 0.08em; text-align: center; padding: 24px; cursor: default; user-select: none;
+    letter-spacing: 0.08em; text-align: center; padding: 24px; cursor: default; box-sizing: border-box;
   }
   #overlay h1 { margin: 0; font-size: 34px; letter-spacing: 0.22em; color: #fff; }
   #overlay small { font-weight: 400; font-size: 14px; letter-spacing: 0.03em; opacity: 0.75; max-width: 46em; }
   #overlay.ready { cursor: pointer; }
   #overlay.gone { display: none; }
   #overlay.error { color: #ffb4a8; }
+  /* phones in landscape are short: tighten the start screen */
+  body.mobile #overlay h1 { font-size: 26px; }
+  body.mobile #overlay { gap: 8px; font-size: 16px; }
+  body.mobile #overlay small { font-size: 13px; }
+  /* touch devices held upright: ask for landscape (the game is landscape only) */
+  #rotate { display: none; z-index: 10; background: #000; }
+  #rotate .icon { font-size: 54px; display: inline-block; animation: tilt 2.2s ease-in-out infinite; }
+  @keyframes tilt { 0%, 30% { transform: rotate(0); } 60%, 100% { transform: rotate(-90deg); } }
+  @media (orientation: portrait) { body.mobile #rotate { display: flex; } }
 </style>
 </head>
 <body>
@@ -27,6 +47,7 @@
   <div id="msg">Loading...</div>
   <small id="hint"></small>
 </div>
+<div id="rotate"><span class="icon">&#128241;</span><div>ROTATE YOUR PHONE TO LANDSCAPE</div></div>
 <script type="module">
   import init from "./endless_sortie.js";
 
@@ -34,6 +55,103 @@
   const overlay = document.getElementById("overlay");
   const msg = document.getElementById("msg");
   const hint = document.getElementById("hint");
+
+  // ---------------------------------------------------------------------------------------------
+  // Phones and tablets get touch controls + tilt steering. `?mobile=1` / `?mobile=0` forces it
+  // either way (handy for trying it in desktop browser devtools' device mode).
+  // ---------------------------------------------------------------------------------------------
+  const params = new URLSearchParams(location.search);
+  const ua = navigator.userAgent || "";
+  const isIOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  function detectMobile() {
+    if (params.has("mobile")) return params.get("mobile") !== "0";
+    if (navigator.userAgentData && navigator.userAgentData.mobile) return true;
+    if (/Android|iPhone|iPad|iPod|Mobile|Silk/i.test(ua) || isIOS) return true;
+    // anything else whose main input is a finger and that cannot hover (a mouse-driven touch laptop is not)
+    return matchMedia("(pointer: coarse)").matches && matchMedia("(hover: none)").matches && navigator.maxTouchPoints > 0;
+  }
+  const MOBILE = detectMobile();
+  if (MOBILE) document.body.classList.add("mobile");
+
+  // ---------------------------------------------------------------------------------------------
+  // Motion sensor bridge. The game (Rust) polls these every frame; see src/platform.rs.
+  // Tilt is reported in the *screen's* frame, so it is right whichever way the phone is landscape:
+  //   roll  = turning the phone like a steering wheel, clockwise (as you see it) = positive
+  //   pitch = top edge tipped away from you = positive
+  // Both come from the direction of gravity, so they are stable at any pose (no gimbal flip).
+  // ---------------------------------------------------------------------------------------------
+  let beta = null, gamma = null, lastEvent = 0, tiltDenied = false, tiltListening = false;
+
+  // <tilt-math>
+  const D2R = Math.PI / 180;
+  const clamp1 = (v) => Math.max(-1, Math.min(1, v));
+  // beta / gamma (W3C device orientation) + screen angle (0, 90, 180, 270) -> [roll, pitch] in degrees
+  function tiltFrom(betaDeg, gammaDeg, screenAngle) {
+    const b = betaDeg * D2R, g = gammaDeg * D2R;
+    // direction of "up" in the device's own frame
+    const dx = -Math.sin(g) * Math.cos(b), dy = Math.sin(b), dz = Math.cos(g) * Math.cos(b);
+    const a = ((Math.round(screenAngle / 90) * 90) % 360 + 360) % 360;
+    // ...and along the screen's right axis (the screen turns with the OS rotation)
+    const sx = a === 90 ? -dy : a === 180 ? -dx : a === 270 ? dy : dx;
+    return [Math.asin(clamp1(-sx)) / D2R, Math.asin(clamp1(dz)) / D2R];
+  }
+  // </tilt-math>
+
+  const screenAngle = () =>
+    (screen.orientation && typeof screen.orientation.angle === "number") ? screen.orientation.angle : (window.orientation || 0);
+
+  function onOrientation(e) {
+    if (e.beta == null || e.gamma == null) return; // desktop browsers fire one empty event
+    beta = e.beta; gamma = e.gamma; lastEvent = performance.now();
+  }
+  function listenForTilt() {
+    if (tiltListening || !("DeviceOrientationEvent" in window)) return;
+    tiltListening = true;
+    window.addEventListener("deviceorientation", onOrientation);
+  }
+  window.esIsMobile = () => MOBILE;
+  // 0 = no sensor (or it went quiet), 1 = readings flowing, 2 = permission refused
+  window.esTiltState = () => tiltDenied ? 2 : (beta !== null && performance.now() - lastEvent < 1000 ? 1 : 0);
+  window.esTiltRoll = () => beta === null ? 0 : tiltFrom(beta, gamma, screenAngle())[0];
+  window.esTiltPitch = () => beta === null ? 0 : tiltFrom(beta, gamma, screenAngle())[1];
+
+  if (MOBILE) {
+    // Android / most browsers: no permission needed. (iOS asks on the first tap, below.)
+    if (!(typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function")) listenForTilt();
+    // no pinch zoom, no scrolling, no long-press menu: it is a game
+    document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+    document.addEventListener("gesturestart", (e) => e.preventDefault());
+    document.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Everything that needs the first tap: fullscreen, landscape lock, motion permission, wake lock.
+  // ---------------------------------------------------------------------------------------------
+  const fsRoot = document.documentElement;
+  const fsRequest = fsRoot.requestFullscreen || fsRoot.webkitRequestFullscreen;
+  const standalone = window.navigator.standalone === true || matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches;
+  let wakeLock = null;
+
+  async function acquireWakeLock() {
+    try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
+  }
+  document.addEventListener("visibilitychange", () => { if (MOBILE && document.visibilityState === "visible" && !overlay.classList.contains("ready")) acquireWakeLock(); });
+
+  async function startMobile() {
+    // all three requests must be made straight from the tap, so fire them together
+    const fs = (fsRequest && !document.fullscreenElement && !document.webkitFullscreenElement)
+      ? Promise.resolve(fsRequest.call(fsRoot, { navigationUI: "hide" })).catch(() => {}) : Promise.resolve();
+    let perm = Promise.resolve();
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      perm = DeviceOrientationEvent.requestPermission()
+        .then((r) => { if (r === "granted") listenForTilt(); else tiltDenied = true; })
+        .catch(() => { tiltDenied = true; });
+    }
+    acquireWakeLock();
+    await Promise.all([fs, perm]);
+    // landscape lock only works once fullscreen is up (and not at all on iOS Safari)
+    try { if (screen.orientation && screen.orientation.lock) await screen.orientation.lock("landscape"); } catch (_) {}
+  }
 
   function fail(text) {
     overlay.className = "error";
@@ -50,13 +168,23 @@
     window.addEventListener("unhandledrejection", () => fail("Something went wrong."));
 
     init().then(() => {
-      msg.textContent = "CLICK TO START";
-      hint.textContent = "Mouse + keyboard. Progress is saved in this browser.";
+      if (MOBILE) {
+        msg.textContent = "TAP TO START";
+        hint.textContent = "Tilt your phone to steer. Left thumb: cannon, missile / bomb, weapon switch. Right thumb: throttle slider, boost. Double-tap the screen for flares. Progress is saved in this browser.";
+        // iPhone Safari cannot go fullscreen from a web page; a home-screen app can
+        if (isIOS && !fsRequest && !standalone) {
+          hint.textContent += " For full screen on iPhone: Share, then Add to Home Screen, and open it from there.";
+        }
+      } else {
+        msg.textContent = "CLICK TO START";
+        hint.textContent = "Mouse + keyboard. Progress is saved in this browser.";
+      }
       overlay.classList.add("ready");
       // Keyboard events go to the focused canvas, and audio / pointer lock need a user gesture anyway.
       overlay.addEventListener("click", () => {
         overlay.classList.add("gone");
         canvas.focus();
+        if (MOBILE) startMobile();
       }, { once: true });
     }).catch((e) => { console.error(e); fail("Failed to load the game."); });
   }
